@@ -34,12 +34,28 @@
 #include <sys/cdefs.h>
 #include <sys/types.h>
 #include <machine/atomic.h>
+#include <asm/atomic64.h>
 
-#define	ATOMIC_LONG_INIT(x)	{ .counter = (x) }
+#if BITS_PER_LONG == 64
 
-typedef struct {
-	volatile long counter;
-} atomic_long_t;
+typedef atomic64_t atomic_long_t;
+
+#define ATOMIC_LONG_INIT(i)	ATOMIC64_INIT(i)
+#define ATOMIC_LONG_PFX(x)	atomic64 ## x
+
+#define atomic_long_cmpxchg atomic64_cmpxchg
+
+#else
+
+typedef atomic_t atomic_long_t;
+
+#define ATOMIC_LONG_INIT(i)	ATOMIC_INIT(i)
+#define ATOMIC_LONG_PFX(x)	atomic ## x
+
+#define atomic_long_cmpxchg atomic_cmpxchg
+
+#endif
+
 
 #define	atomic_long_add(i, v)		atomic_long_add_return((i), (v))
 #define	atomic_long_inc_return(v)	atomic_long_add_return(1, (v))
@@ -48,37 +64,37 @@ typedef struct {
 static inline long
 atomic_long_add_return(long i, atomic_long_t *v)
 {
-	return i + atomic_fetchadd_long(&v->counter, i);
+	return i + atomic_fetchadd_long((volatile unsigned long *)&v->counter, i);
 }
 
 static inline void
 atomic_long_set(atomic_long_t *v, long i)
 {
-	atomic_store_rel_long(&v->counter, i);
+	atomic_store_rel_long((volatile unsigned long *)&v->counter, i);
 }
 
 static inline long
 atomic_long_read(atomic_long_t *v)
 {
-	return atomic_load_acq_long(&v->counter);
+	return atomic_load_acq_long((volatile unsigned long *)&v->counter);
 }
 
 static inline long
 atomic_long_inc(atomic_long_t *v)
 {
-	return atomic_fetchadd_long(&v->counter, 1) + 1;
+	return atomic_fetchadd_long((volatile unsigned long *)&v->counter, 1) + 1;
 }
 
 static inline long
 atomic_long_dec(atomic_long_t *v)
 {
-	return atomic_fetchadd_long(&v->counter, -1) - 1;
+	return atomic_fetchadd_long((volatile unsigned long *)&v->counter, -1) - 1;
 }
 
 static inline long
 atomic_long_xchg(atomic_long_t *v, long val)
 {
-	return atomic_swap_long(&v->counter, val);
+	return atomic_swap_long((volatile uint64_t *)&v->counter, val);
 }
 
 static inline int
@@ -90,7 +106,7 @@ atomic_long_add_unless(atomic_long_t *v, long a, long u)
 		c = atomic_long_read(v);
 		if (unlikely(c == u))
 			break;
-		if (likely(atomic_cmpset_long(&v->counter, c, c + a)))
+		if (likely(atomic_cmpset_long((volatile unsigned long *)&v->counter, c, c + a)))
 			break;
 	}
 	return (c != u);

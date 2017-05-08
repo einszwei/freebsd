@@ -161,7 +161,13 @@ NORMAL_LINT=	${LINT} ${LINTFLAGS} ${CFLAGS:M-[DIU]*} ${.IMPSRC}
 
 # Linux Kernel Programming Interface C-flags
 LINUXKPI_INCLUDES=	-I$S/compat/linuxkpi/common/include
-LINUXKPI_C=		${NORMAL_C} ${LINUXKPI_INCLUDES}
+LINUXKPI_CFLAGS=	-Wno-pointer-arith
+LINUXKPI_C=		${NORMAL_C} ${LINUXKPI_INCLUDES} ${LINUXKPI_CFLAGS}
+
+# Special flags for managing the compat compiles for DRM
+DRM_INCLUDES=	-I$S/compat/linuxkpi/common/include/uapi
+DRM_CFLAGS=	-DKBUILD_MODNAME='"drm"' -Wno-pointer-arith -Wno-format
+DRM_C=		${NORMAL_C} ${DRM_CFLAGS} ${LINUXKPI_INCLUDES} ${DRM_INCLUDES}
 
 # Infiniband C flags.  Correct include paths and omit errors that linux
 # does not honor.

@@ -51,6 +51,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pager.h>
+#include <vm/vm_map.h>
 
 #include <machine/stdarg.h>
 
@@ -68,33 +69,46 @@ __FBSDID("$FreeBSD$");
 #include <linux/sysfs.h>
 #include <linux/mm.h>
 #include <linux/io.h>
-#include <linux/vmalloc.h>
 #include <linux/netdevice.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
+#include <linux/async.h>
+#include <linux/compat.h>
 #include <linux/uaccess.h>
-#include <linux/kernel.h>
 #include <linux/list.h>
+#include <linux/smp.h>
+#include <linux/kthread.h>
+#include <linux/kernel.h>
 #include <linux/compat.h>
 #include <linux/poll.h>
 #include <linux/smp.h>
+
+#include "linux_trace.h"
+
+extern u_int cpu_clflush_line_size;
+extern u_int cpu_id;
+pteval_t __supported_pte_mask __read_mostly = ~0;
 
 #if defined(__i386__) || defined(__amd64__)
 #include <asm/smp.h>
 #endif
 
 SYSCTL_NODE(_compat, OID_AUTO, linuxkpi, CTLFLAG_RW, 0, "LinuxKPI parameters");
+int linux_db_trace;
+SYSCTL_INT(_compat_linuxkpi, OID_AUTO, db_trace, CTLFLAG_RWTUN, &linux_db_trace, 0, "enable backtrace instrumentation");
 
 MALLOC_DEFINE(M_KMALLOC, "linux", "Linux kmalloc compat");
+MALLOC_DEFINE(M_LCINT, "linuxint", "Linux compat internal");
 
-#include <linux/rbtree.h>
-/* Undo Linux compat changes. */
-#undef RB_ROOT
+
 #undef file
 #undef cdev
-#define	RB_ROOT(head)	(head)->rbh_root
 
 static struct vm_area_struct *linux_cdev_handle_find(void *handle);
+
+#if defined(__i386__) || defined(__amd64__)
+struct cpuinfo_x86 boot_cpu_data; 
+#endif
 
 struct kobject linux_class_root;
 struct device linux_root_device;
@@ -104,14 +118,89 @@ struct list_head pci_devices;
 spinlock_t pci_lock;
 
 unsigned long linux_timer_hz_mask;
+struct ida *hwmon_idap;
+DEFINE_IDA(hwmon_ida);
 
-int
-panic_cmp(struct rb_node *one, struct rb_node *two)
+/*
+ * XXX need to define irq_idr 
+ */
+
+struct rendezvous_state {
+	struct mtx rs_mtx;
+	void *rs_data;
+	smp_call_func_t *rs_func;
+	int rs_count;
+	bool rs_free;
+};
+
+static void
+rendezvous_wait(void *arg)
 {
-	panic("no cmp");
+	struct rendezvous_state *rs = arg;
+
+	mtx_lock_spin(&rs->rs_mtx);
+	rs->rs_count--;
+	if (rs->rs_count == 0)
+		wakeup(rs);
+	mtx_unlock_spin(&rs->rs_mtx);
 }
 
-RB_GENERATE(linux_root, rb_node, __entry, panic_cmp);
+static void
+rendezvous_callback(void *arg)
+{
+	struct rendezvous_state *rsp = arg;
+	int needfree;
+
+	rsp->rs_func(rsp->rs_data);
+	if (rsp->rs_free) {
+		mtx_lock_spin(&rsp->rs_mtx);
+		rsp->rs_count--;
+		needfree = (rsp->rs_count == 0);
+		mtx_unlock_spin(&rsp->rs_mtx);
+		if (needfree)
+			free(rsp, M_LCINT);
+	}
+}
+/*
+int
+on_each_cpu(void callback(void *data), void *data, int wait)
+{
+	struct rendezvous_state rs, *rsp;
+	if (wait)
+		rsp = &rs;
+	else
+		rsp = malloc(sizeof(*rsp), M_LCINT, M_WAITOK);
+	bzero(rsp, sizeof(*rsp));
+	rsp->rs_data = data;
+	rsp->rs_func = callback;
+	rsp->rs_count = mp_ncpus;
+	mtx_init(&rsp->rs_mtx, "rslock", NULL, MTX_SPIN | MTX_RECURSE | MTX_NOWITNESS);
+
+	if (wait) {
+		rsp->rs_free = false;
+		mtx_lock_spin(&rsp->rs_mtx);
+		smp_rendezvous(NULL, rendezvous_callback, rendezvous_wait, rsp);
+		if (rsp->rs_count != 0)
+			msleep_spin(rsp, &rsp->rs_mtx, "rendezvous", 0);
+		mtx_unlock_spin(&rsp->rs_mtx);
+	} else {
+		rsp->rs_free = true;
+		smp_rendezvous(NULL, callback, NULL, rsp);
+	}
+	return (0);
+}
+*/
+/*
+ * XXX this leaks right now, we need to track
+ * this memory so that it's freed on return from
+ * the compatibility ioctl calls
+ */
+void *
+compat_alloc_user_space(unsigned long len)
+{
+
+	return (malloc(len, M_LCINT, M_NOWAIT));
+}
 
 int
 kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list args)
@@ -175,8 +264,8 @@ kobject_add_complete(struct kobject *kobj, struct kobject *parent)
 	const struct kobj_type *t;
 	int error;
 
-	kobj->parent = parent;
-	error = sysfs_create_dir(kobj);
+	kobj->parent = kobject_get(parent);
+	error = sysfs_create_dir_ns(kobj, NULL);
 	if (error == 0 && kobj->ktype && kobj->ktype->default_attrs) {
 		struct attribute **attr;
 		t = kobj->ktype;
@@ -190,6 +279,8 @@ kobject_add_complete(struct kobject *kobj, struct kobject *parent)
 			sysfs_remove_dir(kobj);
 		
 	}
+	if (error == 0)
+		kobj->state_in_sysfs = 1;
 	return (error);
 }
 
@@ -215,7 +306,10 @@ linux_kobject_release(struct kref *kref)
 	char *name;
 
 	kobj = container_of(kref, struct kobject, kref);
-	sysfs_remove_dir(kobj);
+	/* we need to work out how to do this in a way that it works */
+	if (kobj->state_in_sysfs) {
+		kobject_del(kobj);
+	}
 	name = kobj->name;
 	if (kobj->ktype && kobj->ktype->release)
 		kobj->ktype->release(kobj);
@@ -485,16 +579,6 @@ linux_cdev_handle_insert(void *handle, struct vm_area_struct *vmap)
 			return (NULL);
 		}
 	}
-	/*
-	 * The same VM object might be shared by multiple processes
-	 * and the mm_struct is usually freed when a process exits.
-	 *
-	 * The atomic reference below makes sure the mm_struct is
-	 * available as long as the vmap is in the linux_vma_head.
-	 */
-	if (atomic_inc_not_zero(&vmap->vm_mm->mm_users) == 0)
-		panic("linuxkpi: mm_users is zero\n");
-
 	TAILQ_INSERT_TAIL(&linux_vma_head, vmap, vm_entry);
 	rw_wunlock(&linux_vma_lock);
 	return (vmap);
@@ -509,9 +593,6 @@ linux_cdev_handle_remove(struct vm_area_struct *vmap)
 	rw_wlock(&linux_vma_lock);
 	TAILQ_REMOVE(&linux_vma_head, vmap, vm_entry);
 	rw_wunlock(&linux_vma_lock);
-
-	/* Drop reference on mm_struct */
-	mmput(vmap->vm_mm);
 	kfree(vmap);
 }
 
@@ -574,12 +655,58 @@ static struct cdev_pager_ops linux_cdev_pager_ops = {
 	.cdev_pg_dtor	= linux_cdev_pager_dtor
 };
 
+static void
+linux_dev_deferred_note(unsigned long arg)
+{
+	struct linux_file *filp = (struct linux_file *)arg;
+
+	spin_lock(&filp->f_lock);
+	KNOTE_LOCKED(&filp->f_selinfo.si_note, 1);
+	spin_unlock(&filp->f_lock);
+}
+
+static void
+kq_lock(void *arg)
+{
+	spinlock_t *s = arg;
+
+	spin_lock(s);
+}
+static void
+kq_unlock(void *arg)
+{
+	spinlock_t *s = arg;
+
+	spin_unlock(s);
+}
+
+static void
+kq_lock_owned(void *arg)
+{
+#ifdef INVARIANTS
+	spinlock_t *s = arg;
+
+	mtx_assert(&s->m, MA_OWNED);
+#endif
+}
+
+static void
+kq_lock_unowned(void *arg)
+{
+#ifdef INVARIANTS
+	spinlock_t *s = arg;
+
+	mtx_assert(&s->m, MA_NOTOWNED);
+#endif
+}
+
 static int
 linux_dev_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 {
 	struct linux_cdev *ldev;
 	struct linux_file *filp;
 	struct file *file;
+	struct tasklet_struct *t;
 	int error;
 
 	file = td->td_fpop;
@@ -593,6 +720,13 @@ linux_dev_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 	vhold(file->f_vnode);
 	filp->f_vnode = file->f_vnode;
 	linux_set_current(td);
+	INIT_LIST_HEAD(&filp->f_entry);
+	t = &filp->f_kevent_tasklet;
+	tasklet_init(t, linux_dev_deferred_note, (u_long)filp);
+	spin_lock_init(&filp->f_lock);
+	knlist_init(&filp->f_selinfo.si_note, &filp->f_lock, kq_lock, kq_unlock,
+		    kq_lock_owned, kq_lock_unowned);
+
 	if (filp->f_op->open) {
 		error = -filp->f_op->open(file->f_vnode, filp);
 		if (error) {
@@ -784,6 +918,8 @@ linux_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 		current->bsd_ioctl_len = 0;
 	}
 
+	if (error == ERESTARTSYS)
+		error = ERESTART;
 	return (error);
 }
 
@@ -863,6 +999,7 @@ static int
 linux_dev_poll(struct cdev *dev, int events, struct thread *td)
 {
 	struct linux_file *filp;
+	struct poll_wqueues table;
 	struct file *file;
 	int revents;
 
@@ -873,15 +1010,64 @@ linux_dev_poll(struct cdev *dev, int events, struct thread *td)
 
 	file = td->td_fpop;
 	filp->f_flags = file->f_flag;
-	linux_set_current(td);
-	if (filp->f_op->poll)
-		revents = filp->f_op->poll(filp, NULL) & events;
-	else
-		revents = 0;
+	if (filp->_file == NULL)
+		filp->_file = file;
 
+	linux_set_current(td);
+	if (filp->f_op->poll) {
+		/* XXX need to add support for bounded wait */
+		poll_initwait(&table);
+		revents = filp->f_op->poll(filp, &table.pt) & events;
+		poll_freewait(&table);
+	} else {
+		revents = 0;
+	}
 	return (revents);
 error:
 	return (events & (POLLHUP|POLLIN|POLLRDNORM|POLLOUT|POLLWRNORM));
+}
+
+static int
+linux_dev_kqfilter(struct cdev *dev, struct knote *kn)
+{
+	struct linux_file *filp;
+	struct file *file;
+	struct poll_wqueues table;
+	struct thread *td;
+	int error, revents;
+
+	td = curthread;
+	file = td->td_fpop;
+	revents = 0;
+	if (dev->si_drv1 == NULL)
+		return (ENXIO);
+	if ((error = devfs_get_cdevpriv((void **)&filp)) != 0)
+		return (error);
+	filp->f_flags = file->f_flag;
+	if (filp->_file == NULL)
+		filp->_file = td->td_fpop;
+	if (filp->f_op->poll == NULL || kn->kn_filter != EVFILT_READ || filp->f_kqfiltops == NULL)
+		return (EINVAL);
+
+	if (kn->kn_filter == EVFILT_READ) {
+		kn->kn_fop = filp->f_kqfiltops;
+		kn->kn_hook = filp;
+		spin_lock(&filp->f_lock);
+		knlist_add(&filp->f_selinfo.si_note, kn, 1);
+		spin_unlock(&filp->f_lock);
+	} else
+		return (EINVAL);
+
+	linux_set_current(td);
+	kevent_initwait(&table);
+	revents = filp->f_op->poll(filp, &table.pt);
+
+	if (revents) {
+		spin_lock(&filp->f_lock);
+		KNOTE_LOCKED(&filp->f_selinfo.si_note, 0);
+		spin_unlock(&filp->f_lock);
+	}
+	return (0);
 }
 
 static int
@@ -990,6 +1176,8 @@ struct cdevsw linuxcdevsw = {
 	.d_ioctl = linux_dev_ioctl,
 	.d_mmap_single = linux_dev_mmap_single,
 	.d_poll = linux_dev_poll,
+	.d_kqfilter = linux_dev_kqfilter,
+	.d_name = "lkpidev",
 };
 
 static int
@@ -1028,14 +1216,19 @@ linux_file_poll(struct file *file, int events, struct ucred *active_cred,
     struct thread *td)
 {
 	struct linux_file *filp;
+	struct poll_wqueues table;
 	int revents;
 
 	filp = (struct linux_file *)file->f_data;
 	filp->f_flags = file->f_flag;
+	if (filp->_file == NULL)
+		filp->_file = td->td_fpop;
 	linux_set_current(td);
-	if (filp->f_op->poll)
-		revents = filp->f_op->poll(filp, NULL) & events;
-	else
+	if (filp->f_op->poll) {
+		poll_initwait(&table);
+		revents = filp->f_op->poll(filp, &table.pt) & events;
+		poll_freewait(&table);
+	} else
 		revents = 0;
 
 	return (revents);
@@ -1124,113 +1317,6 @@ struct fileops linuxfileops = {
 	.fo_sendfile = invfo_sendfile,
 };
 
-/*
- * Hash of vmmap addresses.  This is infrequently accessed and does not
- * need to be particularly large.  This is done because we must store the
- * caller's idea of the map size to properly unmap.
- */
-struct vmmap {
-	LIST_ENTRY(vmmap)	vm_next;
-	void 			*vm_addr;
-	unsigned long		vm_size;
-};
-
-struct vmmaphd {
-	struct vmmap *lh_first;
-};
-#define	VMMAP_HASH_SIZE	64
-#define	VMMAP_HASH_MASK	(VMMAP_HASH_SIZE - 1)
-#define	VM_HASH(addr)	((uintptr_t)(addr) >> PAGE_SHIFT) & VMMAP_HASH_MASK
-static struct vmmaphd vmmaphead[VMMAP_HASH_SIZE];
-static struct mtx vmmaplock;
-
-static void
-vmmap_add(void *addr, unsigned long size)
-{
-	struct vmmap *vmmap;
-
-	vmmap = kmalloc(sizeof(*vmmap), GFP_KERNEL);
-	mtx_lock(&vmmaplock);
-	vmmap->vm_size = size;
-	vmmap->vm_addr = addr;
-	LIST_INSERT_HEAD(&vmmaphead[VM_HASH(addr)], vmmap, vm_next);
-	mtx_unlock(&vmmaplock);
-}
-
-static struct vmmap *
-vmmap_remove(void *addr)
-{
-	struct vmmap *vmmap;
-
-	mtx_lock(&vmmaplock);
-	LIST_FOREACH(vmmap, &vmmaphead[VM_HASH(addr)], vm_next)
-		if (vmmap->vm_addr == addr)
-			break;
-	if (vmmap)
-		LIST_REMOVE(vmmap, vm_next);
-	mtx_unlock(&vmmaplock);
-
-	return (vmmap);
-}
-
-#if defined(__i386__) || defined(__amd64__)
-void *
-_ioremap_attr(vm_paddr_t phys_addr, unsigned long size, int attr)
-{
-	void *addr;
-
-	addr = pmap_mapdev_attr(phys_addr, size, attr);
-	if (addr == NULL)
-		return (NULL);
-	vmmap_add(addr, size);
-
-	return (addr);
-}
-#endif
-
-void
-iounmap(void *addr)
-{
-	struct vmmap *vmmap;
-
-	vmmap = vmmap_remove(addr);
-	if (vmmap == NULL)
-		return;
-#if defined(__i386__) || defined(__amd64__)
-	pmap_unmapdev((vm_offset_t)addr, vmmap->vm_size);
-#endif
-	kfree(vmmap);
-}
-
-
-void *
-vmap(struct page **pages, unsigned int count, unsigned long flags, int prot)
-{
-	vm_offset_t off;
-	size_t size;
-
-	size = count * PAGE_SIZE;
-	off = kva_alloc(size);
-	if (off == 0)
-		return (NULL);
-	vmmap_add((void *)off, size);
-	pmap_qenter(off, pages, count);
-
-	return ((void *)off);
-}
-
-void
-vunmap(void *addr)
-{
-	struct vmmap *vmmap;
-
-	vmmap = vmmap_remove(addr);
-	if (vmmap == NULL)
-		return;
-	pmap_qremove((vm_offset_t)addr, vmmap->vm_size / PAGE_SIZE);
-	kva_free((vm_offset_t)addr, vmmap->vm_size);
-	kfree(vmmap);
-}
 
 char *
 kvasprintf(gfp_t gfp, const char *fmt, va_list ap)
@@ -1340,6 +1426,7 @@ linux_complete_common(struct completion *c, int all)
 long
 linux_wait_for_common(struct completion *c, int flags)
 {
+
 	long error;
 
 	if (SCHEDULER_STOPPED())
@@ -1359,283 +1446,290 @@ linux_wait_for_common(struct completion *c, int flags)
 		sleepq_add(c, NULL, "completion", flags, 0);
 		if (flags & SLEEPQ_INTERRUPTIBLE) {
 			if (sleepq_wait_sig(c, 0) != 0) {
-				error = -ERESTARTSYS;
-				goto intr;
-			}
-		} else
-			sleepq_wait(c, 0);
-	}
-	c->done--;
-	sleepq_release(c);
+			error = -ERESTARTSYS;
+			goto intr;
+		}
+	} else
+		sleepq_wait(c, 0);
+}
+c->done--;
+sleepq_release(c);
 
 intr:
-	PICKUP_GIANT();
+PICKUP_GIANT();
 
-	return (error);
+return (error);
 }
 
 /*
- * Time limited wait for done != 0 with or without signals.
- */
+* Time limited wait for done != 0 with or without signals.
+*/
 long
 linux_wait_for_timeout_common(struct completion *c, long timeout, int flags)
 {
-	long end = jiffies + timeout, error;
-	int ret;
+long end = jiffies + timeout, error;
+int ret;
 
-	if (SCHEDULER_STOPPED())
-		return (0);
+if (SKIP_SLEEP())
+	return (0);
 
-	DROP_GIANT();
+DROP_GIANT();
 
-	if (flags != 0)
-		flags = SLEEPQ_INTERRUPTIBLE | SLEEPQ_SLEEP;
+if (flags != 0)
+	flags = SLEEPQ_INTERRUPTIBLE | SLEEPQ_SLEEP;
+else
+	flags = SLEEPQ_SLEEP;
+
+error = 0;
+ret = 0;
+for (;;) {
+	sleepq_lock(c);
+	if (c->done)
+		break;
+	sleepq_add(c, NULL, "completion", flags, 0);
+	sleepq_set_timeout(c, linux_timer_jiffies_until(end));
+	if (flags & SLEEPQ_INTERRUPTIBLE)
+		ret = sleepq_timedwait_sig(c, 0);
 	else
-		flags = SLEEPQ_SLEEP;
-
-	error = 0;
-	ret = 0;
-	for (;;) {
-		sleepq_lock(c);
-		if (c->done)
-			break;
-		sleepq_add(c, NULL, "completion", flags, 0);
-		sleepq_set_timeout(c, linux_timer_jiffies_until(end));
-		if (flags & SLEEPQ_INTERRUPTIBLE)
-			ret = sleepq_timedwait_sig(c, 0);
+		ret = sleepq_timedwait(c, 0);
+	if (ret != 0) {
+		/* check for timeout or signal */
+		if (ret == EWOULDBLOCK)
+			error = 0;
 		else
-			ret = sleepq_timedwait(c, 0);
-		if (ret != 0) {
-			/* check for timeout or signal */
-			if (ret == EWOULDBLOCK)
-				error = 0;
-			else
-				error = -ERESTARTSYS;
-			goto intr;
-		}
+			error = -ERESTARTSYS;
+		goto intr;
 	}
-	c->done--;
-	sleepq_release(c);
+}
+c->done--;
+sleepq_release(c);
 
 intr:
-	PICKUP_GIANT();
+PICKUP_GIANT();
 
-	/* return how many jiffies are left */
-	return (ret != 0 ? error : linux_timer_jiffies_until(end));
+/* return how many jiffies are left */
+return (ret != 0 ? error : linux_timer_jiffies_until(end));
 }
 
 int
 linux_try_wait_for_completion(struct completion *c)
 {
-	int isdone;
+int isdone;
 
-	isdone = 1;
-	sleepq_lock(c);
-	if (c->done)
-		c->done--;
-	else
-		isdone = 0;
-	sleepq_release(c);
-	return (isdone);
+isdone = 1;
+sleepq_lock(c);
+if (c->done)
+	c->done--;
+else
+	isdone = 0;
+sleepq_release(c);
+return (isdone);
 }
 
 int
 linux_completion_done(struct completion *c)
 {
-	int isdone;
+int isdone;
 
-	isdone = 1;
-	sleepq_lock(c);
-	if (c->done == 0)
-		isdone = 0;
-	sleepq_release(c);
-	return (isdone);
+isdone = 1;
+sleepq_lock(c);
+if (c->done == 0)
+	isdone = 0;
+sleepq_release(c);
+return (isdone);
 }
 
 static void
 linux_cdev_release(struct kobject *kobj)
 {
-	struct linux_cdev *cdev;
-	struct kobject *parent;
+struct linux_cdev *cdev;
+struct kobject *parent;
 
-	cdev = container_of(kobj, struct linux_cdev, kobj);
-	parent = kobj->parent;
-	if (cdev->cdev)
-		destroy_dev(cdev->cdev);
-	kfree(cdev);
-	kobject_put(parent);
+cdev = container_of(kobj, struct linux_cdev, kobj);
+parent = kobj->parent;
+if (cdev->cdev)
+	destroy_dev(cdev->cdev);
+kfree(cdev);
+kobject_put(parent);
 }
 
 static void
 linux_cdev_static_release(struct kobject *kobj)
 {
-	struct linux_cdev *cdev;
-	struct kobject *parent;
+struct linux_cdev *cdev;
+struct kobject *parent;
 
-	cdev = container_of(kobj, struct linux_cdev, kobj);
-	parent = kobj->parent;
-	if (cdev->cdev)
-		destroy_dev(cdev->cdev);
-	kobject_put(parent);
+cdev = container_of(kobj, struct linux_cdev, kobj);
+parent = kobj->parent;
+if (cdev->cdev)
+	destroy_dev(cdev->cdev);
+kobject_put(parent);
 }
 
 const struct kobj_type linux_cdev_ktype = {
-	.release = linux_cdev_release,
+.release = linux_cdev_release,
 };
 
 const struct kobj_type linux_cdev_static_ktype = {
-	.release = linux_cdev_static_release,
+.release = linux_cdev_static_release,
 };
 
 static void
 linux_handle_ifnet_link_event(void *arg, struct ifnet *ifp, int linkstate)
 {
-	struct notifier_block *nb;
+struct notifier_block *nb;
 
-	nb = arg;
-	if (linkstate == LINK_STATE_UP)
-		nb->notifier_call(nb, NETDEV_UP, ifp);
-	else
-		nb->notifier_call(nb, NETDEV_DOWN, ifp);
+nb = arg;
+if (linkstate == LINK_STATE_UP)
+	nb->notifier_call(nb, NETDEV_UP, ifp);
+else
+	nb->notifier_call(nb, NETDEV_DOWN, ifp);
 }
 
 static void
 linux_handle_ifnet_arrival_event(void *arg, struct ifnet *ifp)
 {
-	struct notifier_block *nb;
+struct notifier_block *nb;
 
-	nb = arg;
-	nb->notifier_call(nb, NETDEV_REGISTER, ifp);
+nb = arg;
+nb->notifier_call(nb, NETDEV_REGISTER, ifp);
 }
 
 static void
 linux_handle_ifnet_departure_event(void *arg, struct ifnet *ifp)
 {
-	struct notifier_block *nb;
+struct notifier_block *nb;
 
-	nb = arg;
-	nb->notifier_call(nb, NETDEV_UNREGISTER, ifp);
+nb = arg;
+nb->notifier_call(nb, NETDEV_UNREGISTER, ifp);
 }
 
 static void
 linux_handle_iflladdr_event(void *arg, struct ifnet *ifp)
 {
-	struct notifier_block *nb;
+struct notifier_block *nb;
 
-	nb = arg;
-	nb->notifier_call(nb, NETDEV_CHANGEADDR, ifp);
+nb = arg;
+nb->notifier_call(nb, NETDEV_CHANGEADDR, ifp);
 }
 
 static void
 linux_handle_ifaddr_event(void *arg, struct ifnet *ifp)
 {
-	struct notifier_block *nb;
+struct notifier_block *nb;
 
-	nb = arg;
-	nb->notifier_call(nb, NETDEV_CHANGEIFADDR, ifp);
+nb = arg;
+nb->notifier_call(nb, NETDEV_CHANGEIFADDR, ifp);
 }
 
 int
 register_netdevice_notifier(struct notifier_block *nb)
 {
 
-	nb->tags[NETDEV_UP] = EVENTHANDLER_REGISTER(
-	    ifnet_link_event, linux_handle_ifnet_link_event, nb, 0);
-	nb->tags[NETDEV_REGISTER] = EVENTHANDLER_REGISTER(
-	    ifnet_arrival_event, linux_handle_ifnet_arrival_event, nb, 0);
-	nb->tags[NETDEV_UNREGISTER] = EVENTHANDLER_REGISTER(
-	    ifnet_departure_event, linux_handle_ifnet_departure_event, nb, 0);
-	nb->tags[NETDEV_CHANGEADDR] = EVENTHANDLER_REGISTER(
-	    iflladdr_event, linux_handle_iflladdr_event, nb, 0);
+nb->tags[NETDEV_UP] = EVENTHANDLER_REGISTER(
+    ifnet_link_event, linux_handle_ifnet_link_event, nb, 0);
+nb->tags[NETDEV_REGISTER] = EVENTHANDLER_REGISTER(
+    ifnet_arrival_event, linux_handle_ifnet_arrival_event, nb, 0);
+nb->tags[NETDEV_UNREGISTER] = EVENTHANDLER_REGISTER(
+    ifnet_departure_event, linux_handle_ifnet_departure_event, nb, 0);
+nb->tags[NETDEV_CHANGEADDR] = EVENTHANDLER_REGISTER(
+    iflladdr_event, linux_handle_iflladdr_event, nb, 0);
 
-	return (0);
+return (0);
 }
 
 int
 register_inetaddr_notifier(struct notifier_block *nb)
 {
 
-        nb->tags[NETDEV_CHANGEIFADDR] = EVENTHANDLER_REGISTER(
-            ifaddr_event, linux_handle_ifaddr_event, nb, 0);
-        return (0);
+nb->tags[NETDEV_CHANGEIFADDR] = EVENTHANDLER_REGISTER(
+    ifaddr_event, linux_handle_ifaddr_event, nb, 0);
+return (0);
 }
 
 int
 unregister_netdevice_notifier(struct notifier_block *nb)
 {
 
-        EVENTHANDLER_DEREGISTER(ifnet_link_event,
-	    nb->tags[NETDEV_UP]);
-        EVENTHANDLER_DEREGISTER(ifnet_arrival_event,
-	    nb->tags[NETDEV_REGISTER]);
-        EVENTHANDLER_DEREGISTER(ifnet_departure_event,
-	    nb->tags[NETDEV_UNREGISTER]);
-        EVENTHANDLER_DEREGISTER(iflladdr_event,
-	    nb->tags[NETDEV_CHANGEADDR]);
+EVENTHANDLER_DEREGISTER(ifnet_link_event,
+    nb->tags[NETDEV_UP]);
+EVENTHANDLER_DEREGISTER(ifnet_arrival_event,
+    nb->tags[NETDEV_REGISTER]);
+EVENTHANDLER_DEREGISTER(ifnet_departure_event,
+    nb->tags[NETDEV_UNREGISTER]);
+EVENTHANDLER_DEREGISTER(iflladdr_event,
+    nb->tags[NETDEV_CHANGEADDR]);
 
-	return (0);
+return (0);
 }
 
 int
 unregister_inetaddr_notifier(struct notifier_block *nb)
 {
 
-        EVENTHANDLER_DEREGISTER(ifaddr_event,
-            nb->tags[NETDEV_CHANGEIFADDR]);
+EVENTHANDLER_DEREGISTER(ifaddr_event,
+    nb->tags[NETDEV_CHANGEIFADDR]);
 
-        return (0);
+return (0);
 }
 
 struct list_sort_thunk {
-	int (*cmp)(void *, struct list_head *, struct list_head *);
-	void *priv;
+int (*cmp)(void *, struct list_head *, struct list_head *);
+void *priv;
 };
 
 static inline int
 linux_le_cmp(void *priv, const void *d1, const void *d2)
 {
-	struct list_head *le1, *le2;
-	struct list_sort_thunk *thunk;
+struct list_head *le1, *le2;
+struct list_sort_thunk *thunk;
 
-	thunk = priv;
-	le1 = *(__DECONST(struct list_head **, d1));
-	le2 = *(__DECONST(struct list_head **, d2));
-	return ((thunk->cmp)(thunk->priv, le1, le2));
+thunk = priv;
+le1 = *(__DECONST(struct list_head **, d1));
+le2 = *(__DECONST(struct list_head **, d2));
+return ((thunk->cmp)(thunk->priv, le1, le2));
 }
 
 void
 list_sort(void *priv, struct list_head *head, int (*cmp)(void *priv,
-    struct list_head *a, struct list_head *b))
+struct list_head *a, struct list_head *b))
 {
-	struct list_sort_thunk thunk;
-	struct list_head **ar, *le;
-	size_t count, i;
+struct list_sort_thunk thunk;
+struct list_head **ar, *le;
+size_t count, i;
 
-	count = 0;
-	list_for_each(le, head)
-		count++;
-	ar = malloc(sizeof(struct list_head *) * count, M_KMALLOC, M_WAITOK);
-	i = 0;
-	list_for_each(le, head)
-		ar[i++] = le;
-	thunk.cmp = cmp;
-	thunk.priv = priv;
-	qsort_r(ar, count, sizeof(struct list_head *), &thunk, linux_le_cmp);
-	INIT_LIST_HEAD(head);
-	for (i = 0; i < count; i++)
-		list_add_tail(ar[i], head);
-	free(ar, M_KMALLOC);
+count = 0;
+list_for_each(le, head)
+	count++;
+ar = malloc(sizeof(struct list_head *) * count, M_KMALLOC, M_WAITOK);
+i = 0;
+list_for_each(le, head)
+	ar[i++] = le;
+thunk.cmp = cmp;
+thunk.priv = priv;
+qsort_r(ar, count, sizeof(struct list_head *), &thunk, linux_le_cmp);
+INIT_LIST_HEAD(head);
+for (i = 0; i < count; i++)
+	list_add_tail(ar[i], head);
+free(ar, M_KMALLOC);
 }
 
 void
 linux_irq_handler(void *ent)
 {
-	struct irq_ent *irqe;
+struct irq_ent *irqe;
 
-	linux_set_current(curthread);
+linux_set_current(curthread);
 
-	irqe = ent;
-	irqe->handler(irqe->irq, irqe->arg);
+irqe = ent;
+irqe->handler(irqe->irq, irqe->arg);
+}
+
+int
+in_atomic(void)
+{
+
+return ((curthread->td_pflags & TDP_NOFAULTING) != 0);
 }
 
 #if defined(__i386__) || defined(__amd64__)
@@ -1660,77 +1754,116 @@ linux_on_each_cpu(void callback(void *), void *data)
 struct linux_cdev *
 linux_find_cdev(const char *name, unsigned major, unsigned minor)
 {
-	int unit = MKDEV(major, minor);
-	struct cdev *cdev;
+int unit = MKDEV(major, minor);
+struct cdev *cdev;
 
-	dev_lock();
-	LIST_FOREACH(cdev, &linuxcdevsw.d_devs, si_list) {
-		struct linux_cdev *ldev = cdev->si_drv1;
-		if (dev2unit(cdev) == unit &&
-		    strcmp(kobject_name(&ldev->kobj), name) == 0) {
-			break;
-		}
+dev_lock();
+LIST_FOREACH(cdev, &linuxcdevsw.d_devs, si_list) {
+	struct linux_cdev *ldev = cdev->si_drv1;
+	if (dev2unit(cdev) == unit &&
+	    strcmp(kobject_name(&ldev->kobj), name) == 0) {
+		break;
 	}
-	dev_unlock();
+}
+dev_unlock();
 
-	return (cdev != NULL ? cdev->si_drv1 : NULL);
+return (cdev != NULL ? cdev->si_drv1 : NULL);
 }
 
 int
 __register_chrdev(unsigned int major, unsigned int baseminor,
-    unsigned int count, const char *name,
-    const struct file_operations *fops)
+unsigned int count, const char *name,
+const struct file_operations *fops)
 {
-	struct linux_cdev *cdev;
-	int ret = 0;
-	int i;
+struct linux_cdev *cdev;
+int ret = 0;
+int i;
 
-	for (i = baseminor; i < baseminor + count; i++) {
-		cdev = cdev_alloc();
-		cdev_init(cdev, fops);
-		kobject_set_name(&cdev->kobj, name);
+for (i = baseminor; i < baseminor + count; i++) {
+	cdev = cdev_alloc();
+	cdev_init(cdev, fops);
+	kobject_set_name(&cdev->kobj, name);
 
-		ret = cdev_add(cdev, makedev(major, i), 1);
-		if (ret != 0)
-			break;
-	}
-	return (ret);
+	ret = cdev_add(cdev, makedev(major, i), 1);
+	if (ret != 0)
+		break;
+}
+return (ret);
 }
 
 int
 __register_chrdev_p(unsigned int major, unsigned int baseminor,
-    unsigned int count, const char *name,
-    const struct file_operations *fops, uid_t uid,
-    gid_t gid, int mode)
+unsigned int count, const char *name,
+const struct file_operations *fops, uid_t uid,
+gid_t gid, int mode)
 {
-	struct linux_cdev *cdev;
-	int ret = 0;
-	int i;
+struct linux_cdev *cdev;
+int ret = 0;
+int i;
 
-	for (i = baseminor; i < baseminor + count; i++) {
-		cdev = cdev_alloc();
-		cdev_init(cdev, fops);
-		kobject_set_name(&cdev->kobj, name);
+for (i = baseminor; i < baseminor + count; i++) {
+	cdev = cdev_alloc();
+	cdev_init(cdev, fops);
+	kobject_set_name(&cdev->kobj, name);
 
-		ret = cdev_add_ext(cdev, makedev(major, i), uid, gid, mode);
-		if (ret != 0)
-			break;
-	}
-	return (ret);
+	ret = cdev_add_ext(cdev, makedev(major, i), uid, gid, mode);
+	if (ret != 0)
+		break;
+}
+return (ret);
 }
 
 void
 __unregister_chrdev(unsigned int major, unsigned int baseminor,
-    unsigned int count, const char *name)
+unsigned int count, const char *name)
 {
-	struct linux_cdev *cdevp;
-	int i;
+struct linux_cdev *cdevp;
+int i;
 
-	for (i = baseminor; i < baseminor + count; i++) {
-		cdevp = linux_find_cdev(name, major, i);
-		if (cdevp != NULL)
-			cdev_del(cdevp);
-	}
+for (i = baseminor; i < baseminor + count; i++) {
+	cdevp = linux_find_cdev(name, major, i);
+	if (cdevp != NULL)
+		cdev_del(cdevp);
+}
+}
+
+static DECLARE_WAIT_QUEUE_HEAD(async_done);
+static atomic_t nextcookie;
+
+static void
+async_run_entry_fn(struct work_struct *work)
+{
+struct async_entry *entry; 	
+
+linux_set_current(curthread);
+entry  = container_of(work, struct async_entry, work);
+entry->func(entry->data, entry->cookie);
+kfree(entry);
+wake_up(&async_done);
+
+}
+
+async_cookie_t
+async_schedule(async_func_t func, void *data)
+{
+struct async_entry *entry;
+async_cookie_t newcookie;
+
+DODGY();
+entry = kzalloc(sizeof(struct async_entry), GFP_ATOMIC);
+
+if (entry == NULL) {
+	newcookie = atomic_inc_return(&nextcookie);
+	func(data, newcookie);
+	return (newcookie);
+}
+
+INIT_WORK(&entry->work, async_run_entry_fn);
+entry->func = func;
+entry->data = data;
+newcookie = entry->cookie = atomic_inc_return(&nextcookie);
+queue_work(system_unbound_wq, &entry->work);
+return (newcookie);
 }
 
 #if defined(__i386__) || defined(__amd64__)
@@ -1740,47 +1873,52 @@ bool linux_cpu_has_clflush;
 static void
 linux_compat_init(void *arg)
 {
-	struct sysctl_oid *rootoid;
-	int i;
+struct sysctl_oid *rootoid;
 
 #if defined(__i386__) || defined(__amd64__)
-	linux_cpu_has_clflush = (cpu_feature & CPUID_CLFSH);
+if (cpu_feature & CPUID_CLFSH)
+	set_bit(X86_FEATURE_CLFLUSH, &boot_cpu_data.x86_capability);
+if (cpu_feature & CPUID_PAT)
+	set_bit(X86_FEATURE_PAT, &boot_cpu_data.x86_capability);
 #endif
-	rw_init(&linux_vma_lock, "lkpi-vma-lock");
+hwmon_idap = &hwmon_ida;
+rw_init(&linux_vma_lock, "lkpi-vma-lock");
+#if defined(__i386__) || defined(__amd64__)
+boot_cpu_data.x86_clflush_size = cpu_clflush_line_size;
+boot_cpu_data.x86 = ((cpu_id & 0xF0000) >> 12) | ((cpu_id & 0xF0) >> 4);
+#endif
 
-	rootoid = SYSCTL_ADD_ROOT_NODE(NULL,
-	    OID_AUTO, "sys", CTLFLAG_RD|CTLFLAG_MPSAFE, NULL, "sys");
-	kobject_init(&linux_class_root, &linux_class_ktype);
-	kobject_set_name(&linux_class_root, "class");
-	linux_class_root.oidp = SYSCTL_ADD_NODE(NULL, SYSCTL_CHILDREN(rootoid),
-	    OID_AUTO, "class", CTLFLAG_RD|CTLFLAG_MPSAFE, NULL, "class");
-	kobject_init(&linux_root_device.kobj, &linux_dev_ktype);
-	kobject_set_name(&linux_root_device.kobj, "device");
-	linux_root_device.kobj.oidp = SYSCTL_ADD_NODE(NULL,
-	    SYSCTL_CHILDREN(rootoid), OID_AUTO, "device", CTLFLAG_RD, NULL,
-	    "device");
-	linux_root_device.bsddev = root_bus;
-	linux_class_misc.name = "misc";
-	class_register(&linux_class_misc);
-	INIT_LIST_HEAD(&pci_drivers);
-	INIT_LIST_HEAD(&pci_devices);
-	spin_lock_init(&pci_lock);
-	mtx_init(&vmmaplock, "IO Map lock", NULL, MTX_DEF);
-	for (i = 0; i < VMMAP_HASH_SIZE; i++)
-		LIST_INIT(&vmmaphead[i]);
+rootoid = SYSCTL_ADD_ROOT_NODE(NULL,
+    OID_AUTO, "sys", CTLFLAG_RD|CTLFLAG_MPSAFE, NULL, "sys");
+kobject_init(&linux_class_root, &linux_class_ktype);
+kobject_set_name(&linux_class_root, "class");
+linux_class_root.oidp = SYSCTL_ADD_NODE(NULL, SYSCTL_CHILDREN(rootoid),
+    OID_AUTO, "class", CTLFLAG_RD|CTLFLAG_MPSAFE, NULL, "class");
+kobject_init(&linux_root_device.kobj, &linux_dev_ktype);
+kobject_set_name(&linux_root_device.kobj, "device");
+linux_root_device.kobj.oidp = SYSCTL_ADD_NODE(NULL,
+    SYSCTL_CHILDREN(rootoid), OID_AUTO, "device", CTLFLAG_RD, NULL,
+    "device");
+linux_root_device.bsddev = root_bus;
+linux_class_misc.name = "misc";
+class_register(&linux_class_misc);
+INIT_LIST_HEAD(&pci_drivers);
+INIT_LIST_HEAD(&pci_devices);
+spin_lock_init(&pci_lock);
 }
-SYSINIT(linux_compat, SI_SUB_DRIVERS, SI_ORDER_SECOND, linux_compat_init, NULL);
+SYSINIT(linux_compat, SI_SUB_VFS, SI_ORDER_ANY, linux_compat_init, NULL);
 
 static void
 linux_compat_uninit(void *arg)
 {
-	linux_kobject_kfree_name(&linux_class_root);
-	linux_kobject_kfree_name(&linux_root_device.kobj);
-	linux_kobject_kfree_name(&linux_class_misc.kobj);
+linux_kobject_kfree_name(&linux_class_root);
+linux_kobject_kfree_name(&linux_root_device.kobj);
+linux_kobject_kfree_name(&linux_class_misc.kobj);
 
+spin_lock_destroy(&pci_lock);
 	rw_destroy(&linux_vma_lock);
 }
-SYSUNINIT(linux_compat, SI_SUB_DRIVERS, SI_ORDER_SECOND, linux_compat_uninit, NULL);
+SYSUNINIT(linux_compat, SI_SUB_VFS, SI_ORDER_ANY, linux_compat_uninit, NULL);
 
 /*
  * NOTE: Linux frequently uses "unsigned long" for pointer to integer

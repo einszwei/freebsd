@@ -38,9 +38,18 @@
 #include <sys/vnode.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
+
 #include <linux/types.h>
 #include <linux/wait.h>
+#include <linux/dcache.h>
 #include <linux/semaphore.h>
+#include <linux/list.h>
+#include <linux/atomic.h>
+#include <linux/shrinker.h>
+#include <linux/dcache.h>
+#include <linux/mutex.h>
+#include <linux/capability.h>
+#include <linux/interrupt.h>
 
 struct module;
 struct kiocb;
@@ -52,6 +61,7 @@ struct pipe_inode_info;
 struct vm_area_struct;
 struct poll_table_struct;
 struct files_struct;
+struct super_block;
 
 #define	inode	vnode
 #define	i_cdev	v_rdev
@@ -59,14 +69,16 @@ struct files_struct;
 #define	S_IRUGO	(S_IRUSR | S_IRGRP | S_IROTH)
 #define	S_IWUGO	(S_IWUSR | S_IWGRP | S_IWOTH)
 
-
 typedef struct files_struct *fl_owner_t;
 
-struct dentry {
-	struct inode	*d_inode;
-};
-
 struct file_operations;
+
+#define address_space vm_object
+#define i_mapping v_bufobj.bo_object
+#define i_private v_data
+#define file_inode(f) ((f)->f_vnode)
+/* this value isn't needed by the compat layer */
+static inline void i_size_write(void *inode, off_t i_size) { ; }
 
 struct linux_file {
 	struct file	*_file;
@@ -79,8 +91,17 @@ struct linux_file {
 	struct selinfo	f_selinfo;
 	struct sigio	*f_sigio;
 	struct vnode	*f_vnode;
-};
+	atomic_long_t		f_count;
+	vm_object_t	f_mapping;
 
+	/* kqfilter support */
+	struct tasklet_struct f_kevent_tasklet;
+	struct list_head f_entry;
+	struct filterops *f_kqfiltops;
+	/* protects f_sigio.si_note and f_entry */
+	spinlock_t	f_lock;
+};
+#define f_inode		f_vnode
 #define	file		linux_file
 #define	fasync_struct	sigio *
 
@@ -151,6 +172,21 @@ struct file_operations {
 #define	FMODE_WRITE	FWRITE
 #define	FMODE_EXEC	FEXEC
 
+/* Alas, no aliases. Too much hassle with bringing module.h everywhere */
+#define fops_put(fops) \
+	do { if (fops) module_put((fops)->owner); } while(0)
+/*
+ * This one is to be used *ONLY* from ->open() instances.
+ * fops must be non-NULL, pinned down *and* module dependencies
+ * should be sufficient to pin the caller down as well.
+ */
+#define replace_fops(f, fops) \
+	do {	\
+		struct file *__file = (f); \
+		fops_put(__file->f_op); \
+		BUG_ON(!(__file->f_op = (fops))); \
+	} while(0)
+
 int __register_chrdev(unsigned int major, unsigned int baseminor,
     unsigned int count, const char *name,
     const struct file_operations *fops);
@@ -220,29 +256,63 @@ iminor(struct inode *inode)
 	return (minor(dev2unit(inode->v_rdev)));
 }
 
-static inline struct inode *
-igrab(struct inode *inode)
+static inline struct linux_file *
+get_file(struct linux_file *f)
 {
-	int error;
-
-	error = vget(inode, 0, curthread);
-	if (error)
-		return (NULL);
-
-	return (inode);
+	fhold(f->_file);
+	return (f);
 }
 
-static inline void
-iput(struct inode *inode)
-{
-
-	vrele(inode);
-}
+extern loff_t default_llseek(struct file *file, loff_t offset, int whence);
 
 static inline loff_t 
 no_llseek(struct file *file, loff_t offset, int whence)
 {
         return -ESPIPE;
 }
+
+static inline loff_t 
+noop_llseek(struct file *file, loff_t offset, int whence)
+{
+        return file->_file->f_offset;
+}
+
+static inline loff_t
+fixed_size_llseek(struct file *file, loff_t offset,
+				       int whence, loff_t size)
+{
+	panic("%s unimplemented", __FUNCTION__);
+}
+
+unsigned long invalidate_mapping_pages(struct address_space *mapping,
+					pgoff_t start, pgoff_t end);
+
+struct page *shmem_read_mapping_page_gfp(struct address_space *as, int idx, gfp_t gfp);
+
+static inline struct page *
+shmem_read_mapping_page(struct address_space *as, int idx)
+{
+
+	return (shmem_read_mapping_page_gfp(as, idx, 0));
+}
+
+extern struct linux_file *shmem_file_setup(char *name, loff_t size, unsigned long flags);
+
+static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t mask) {}
+static inline gfp_t mapping_gfp_mask(struct address_space *m)
+{
+	return (0);
+}
+void shmem_truncate_range(struct vnode *, loff_t, loff_t);
+/*
+  void shmem_truncate_range(struct vnode *, int, loff_t) =>
+  	vm_obj = obj->base.i_mapping.vm_obj;
+	VM_OBJECT_WLOCK(vm_obj);
+	vm_object_page_remove(vm_obj, 0, 0, false);
+	VM_OBJECT_WUNLOCK(vm_obj);
+ */
+
+extern struct address_space *alloc_anon_mapping(size_t);
+extern void free_anon_mapping(struct address_space *);
 
 #endif /* _LINUX_FS_H_ */

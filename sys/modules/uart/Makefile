@@ -6,10 +6,6 @@
 uart_bus_ebus=	uart_bus_ebus.c
 .endif
 
-.if ${MACHINE_CPUARCH} == "arm"
-uart_dev_lpc=	uart_dev_lpc.c
-.endif
-
 .if ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "arm" || \
     ${MACHINE_CPUARCH} == "powerpc" || ${MACHINE_CPUARCH} == "riscv" || \
     ${MACHINE_CPUARCH} == "sparc64"

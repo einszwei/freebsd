@@ -191,6 +191,44 @@ ATOMIC_ACQ_REL(clear, 64)
 ATOMIC_ACQ_REL_LONG(clear)
 
 static __inline int
+atomic_fcmpset_8(volatile uint8_t *p, uint8_t *cmpval, uint8_t newval)
+{
+	uint8_t tmp;
+	uint8_t _cmpval = *cmpval;
+	int ret;
+
+	__asm __volatile(
+	    "   mov 		%0, #1		\n"
+	    "   ldrexb		%1, [%2]	\n"
+	    "   cmp		%1, %3		\n"
+	    "   it		eq		\n"
+	    "   strexbeq	%0, %4, [%2]	\n"
+	    : "=&r" (ret), "=&r" (tmp), "+r" (p), "+r" (_cmpval), "+r" (newval)
+	    : : "cc", "memory");
+	*cmpval = tmp;
+	return (!ret);
+}
+
+static __inline int
+atomic_fcmpset_16(volatile uint16_t *p, uint16_t *cmpval, uint16_t newval)
+{
+	uint32_t tmp;
+	uint32_t _cmpval = *cmpval;
+	int ret;
+
+	__asm __volatile(
+	    "   mov 		%0, #1		\n"
+	    "   ldrexh		%1, [%2]	\n"
+	    "   cmp		%1, %3		\n"
+	    "   it		eq		\n"
+	    "   strexheq	%0, %4, [%2]	\n"
+	    : "=&r" (ret), "=&r" (tmp), "+r" (p), "+r" (_cmpval), "+r" (newval)
+	    : : "cc", "memory");
+	*cmpval = tmp;
+	return (!ret);
+}
+
+static __inline int
 atomic_fcmpset_32(volatile uint32_t *p, uint32_t *cmpval, uint32_t newval)
 {
 	uint32_t tmp;

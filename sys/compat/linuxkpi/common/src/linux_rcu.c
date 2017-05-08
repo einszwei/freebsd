@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2016 Matt Macy (mmacy@nextbsd.org)
+ * Copyright (c) 2017 Hans Petter Selasky
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -58,6 +58,10 @@ __FBSDID("$FreeBSD$");
 #define	RCU_SKIP(void)	unlikely(SCHEDULER_STOPPED() || kdb_active)
 #endif
 
+struct linux_rcu_cpu_record {
+	struct mtx sync_lock;
+} __aligned(CACHE_LINE_SIZE);
+
 struct callback_head {
 	STAILQ_ENTRY(callback_head) entry;
 	rcu_callback_t func;
@@ -77,8 +81,7 @@ struct linux_epoch_record {
 
 /*
  * Verify that "struct rcu_head" is big enough to hold "struct
- * callback_head". This has been done to avoid having to add special
- * compile flags for including ck_epoch.h to all clients of the
+ * callback_head". This avoids header file pollution in the
  * LinuxKPI.
  */
 CTASSERT(sizeof(struct rcu_head) == sizeof(struct callback_head));
@@ -154,6 +157,7 @@ linux_rcu_cleaner_func(void *context __unused, int pending __unused)
 	linux_synchronize_rcu();
 
 	/* dispatch all callbacks, if any */
+
 	while ((rcu = STAILQ_FIRST(&tmp_head)) != NULL) {
 		uintptr_t offset;
 

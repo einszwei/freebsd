@@ -67,7 +67,29 @@ linux_alloc_current(struct thread *td, int flags)
 	ts->comm = td->td_name;
 	ts->pid = td->td_tid;
 	atomic_set(&ts->usage, 1);
-	ts->state = TASK_RUNNING;
+	mtx_init(&ts->sleep_lock, "lkpislplock", NULL, MTX_DEF);
+	atomic_set(&ts->state, TASK_RUNNING);
+
+	proc = td->td_proc;
+
+	/* check if another thread already has a mm_struct */
+	PROC_LOCK(proc);
+	FOREACH_THREAD_IN_PROC(proc, td_other) {
+		ts_other = td_other->td_lkpi_task;
+		if (ts_other == NULL)
+			continue;
+
+		mm_other = ts_other->mm;
+		if (mm_other == NULL)
+			continue;
+
+		/* try to share other mm_struct */
+		if (atomic_inc_not_zero(&mm_other->mm_users)) {
+			/* set mm_struct pointer */
+			ts->mm = mm_other;
+			break;
+		}
+	}
 
 	proc = td->td_proc;
 
@@ -138,6 +160,7 @@ void
 linux_free_current(struct task_struct *ts)
 {
 	mmput(ts->mm);
+	mtx_destroy(&ts->sleep_lock);
 	free(ts, M_LINUX_CURRENT);
 }
 

@@ -451,11 +451,16 @@ device_t
 pci_find_class(uint8_t class, uint8_t subclass)
 {
 	struct pci_devinfo *dinfo;
+	int prev_found;
 
+	prev_found = 0;
 	STAILQ_FOREACH(dinfo, &pci_devq, pci_links) {
 		if (dinfo->cfg.baseclass == class &&
 		    dinfo->cfg.subclass == subclass) {
-			return (dinfo->cfg.dev);
+			if (dev == NULL || prev_found)
+				return (dinfo->cfg.dev);
+			if (dinfo->cfg.dev == dev)
+				prev_found = 1;
 		}
 	}
 

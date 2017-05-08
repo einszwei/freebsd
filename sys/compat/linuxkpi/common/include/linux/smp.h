@@ -34,6 +34,7 @@
 	linux_on_each_cpu(cb, data);				\
 })
 
+typedef void smp_call_func_t(void *info);
 extern int	linux_on_each_cpu(void (*)(void *), void *);
 
 #endif /* _LINUX_SMP_H_ */

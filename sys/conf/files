@@ -1441,99 +1441,139 @@ dev/de/if_de.c			optional de pci
 dev/dme/if_dme.c		optional dme
 dev/dpt/dpt_pci.c		optional dpt pci
 dev/dpt/dpt_scsi.c		optional dpt
-dev/drm/ati_pcigart.c		optional drm
-dev/drm/drm_agpsupport.c	optional drm
-dev/drm/drm_auth.c		optional drm
-dev/drm/drm_bufs.c		optional drm
-dev/drm/drm_context.c		optional drm
-dev/drm/drm_dma.c		optional drm
-dev/drm/drm_drawable.c		optional drm
-dev/drm/drm_drv.c		optional drm
-dev/drm/drm_fops.c		optional drm
-dev/drm/drm_hashtab.c		optional drm
-dev/drm/drm_ioctl.c		optional drm
-dev/drm/drm_irq.c		optional drm
-dev/drm/drm_lock.c		optional drm
-dev/drm/drm_memory.c		optional drm
-dev/drm/drm_mm.c		optional drm
-dev/drm/drm_pci.c		optional drm
-dev/drm/drm_scatter.c		optional drm
-dev/drm/drm_sman.c		optional drm
-dev/drm/drm_sysctl.c		optional drm
-dev/drm/drm_vm.c		optional drm
-dev/drm/mach64_dma.c		optional mach64drm
-dev/drm/mach64_drv.c		optional mach64drm
-dev/drm/mach64_irq.c		optional mach64drm
-dev/drm/mach64_state.c		optional mach64drm
-dev/drm/mga_dma.c		optional mgadrm
-dev/drm/mga_drv.c		optional mgadrm
-dev/drm/mga_irq.c		optional mgadrm
-dev/drm/mga_state.c		optional mgadrm
-dev/drm/mga_warp.c		optional mgadrm
-dev/drm/r128_cce.c		optional r128drm \
-	compile-with "${NORMAL_C} ${NO_WCONSTANT_CONVERSION}"
-dev/drm/r128_drv.c		optional r128drm
-dev/drm/r128_irq.c		optional r128drm
-dev/drm/r128_state.c		optional r128drm
-dev/drm/savage_bci.c		optional savagedrm
-dev/drm/savage_drv.c		optional savagedrm
-dev/drm/savage_state.c		optional savagedrm
-dev/drm/sis_drv.c		optional sisdrm
-dev/drm/sis_ds.c		optional sisdrm
-dev/drm/sis_mm.c		optional sisdrm
-dev/drm/tdfx_drv.c		optional tdfxdrm
-dev/drm/via_dma.c		optional viadrm
-dev/drm/via_dmablit.c		optional viadrm
-dev/drm/via_drv.c		optional viadrm
-dev/drm/via_irq.c		optional viadrm
-dev/drm/via_map.c		optional viadrm
-dev/drm/via_mm.c		optional viadrm
-dev/drm/via_verifier.c		optional viadrm
-dev/drm/via_video.c		optional viadrm
-dev/drm2/drm_agpsupport.c	optional drm2
-dev/drm2/drm_auth.c		optional drm2
-dev/drm2/drm_bufs.c		optional drm2
-dev/drm2/drm_buffer.c		optional drm2
-dev/drm2/drm_context.c		optional drm2
-dev/drm2/drm_crtc.c		optional drm2
-dev/drm2/drm_crtc_helper.c	optional drm2
-dev/drm2/drm_dma.c		optional drm2
-dev/drm2/drm_dp_helper.c	optional drm2
-dev/drm2/drm_dp_iic_helper.c	optional drm2
-dev/drm2/drm_drv.c		optional drm2
-dev/drm2/drm_edid.c		optional drm2
-dev/drm2/drm_fb_helper.c	optional drm2
-dev/drm2/drm_fops.c		optional drm2
-dev/drm2/drm_gem.c		optional drm2
-dev/drm2/drm_gem_names.c	optional drm2
-dev/drm2/drm_global.c		optional drm2
-dev/drm2/drm_hashtab.c		optional drm2
-dev/drm2/drm_ioctl.c		optional drm2
-dev/drm2/drm_irq.c		optional drm2
-dev/drm2/drm_linux_list_sort.c	optional drm2
-dev/drm2/drm_lock.c		optional drm2
-dev/drm2/drm_memory.c		optional drm2
-dev/drm2/drm_mm.c		optional drm2
-dev/drm2/drm_modes.c		optional drm2
-dev/drm2/drm_pci.c		optional drm2
-dev/drm2/drm_platform.c		optional drm2
-dev/drm2/drm_scatter.c		optional drm2
-dev/drm2/drm_stub.c		optional drm2
-dev/drm2/drm_sysctl.c		optional drm2
-dev/drm2/drm_vm.c		optional drm2
-dev/drm2/drm_os_freebsd.c	optional drm2
-dev/drm2/ttm/ttm_agp_backend.c	optional drm2
-dev/drm2/ttm/ttm_lock.c		optional drm2
-dev/drm2/ttm/ttm_object.c	optional drm2
-dev/drm2/ttm/ttm_tt.c		optional drm2
-dev/drm2/ttm/ttm_bo_util.c	optional drm2
-dev/drm2/ttm/ttm_bo.c		optional drm2
-dev/drm2/ttm/ttm_bo_manager.c	optional drm2
-dev/drm2/ttm/ttm_execbuf_util.c	optional drm2
-dev/drm2/ttm/ttm_memory.c	optional drm2
-dev/drm2/ttm/ttm_page_alloc.c	optional drm2
-dev/drm2/ttm/ttm_bo_vm.c	optional drm2
-dev/drm2/ati_pcigart.c		optional drm2 agp pci
+
+dev/drm/ati_pcigart.c		optional drm agp pci \
+	compile-with	"${DRM_C}"
+dev/drm/drm_agpsupport.c	optional drm agp \
+	compile-with	"${DRM_C}"
+dev/drm/drm_atomic.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_atomic_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_auth.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_blend.c		optional drm \
+	compile-with	"${DRM_C} -Wno-cast-qual"
+dev/drm/drm_bridge.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_bufs.c		optional drm \
+	compile-with	"${DRM_C} -Wno-incompatible-pointer-types"
+dev/drm/drm_cache.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_color_mgmt.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_connector.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_context.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_crtc.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_crtc_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_debugfs.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_dma.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_dp_aux_dev.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_dp_dual_mode_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_dp_helper.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_dp_mst_topology.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_drv.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_edid.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_edid_load.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_encoder.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_encoder_slave.c	optional drm \
+	compile-with	"${DRM_C} -Wno-unused-variable"
+dev/drm/drm_fb_helper.c		optional drm \
+	compile-with	"${DRM_C} -Wno-unused-variable"
+dev/drm/drm_fb_helper_freebsd.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_flip_work.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_fops.c		optional drm \
+	compile-with	"${DRM_C} -Wno-int-conversion"
+dev/drm/drm_fourcc.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_framebuffer.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_gem.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_gem_cma_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_global.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_hashtab.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_info.c		optional drm \
+	compile-with	"${DRM_C} -Wno-int-conversion"
+dev/drm/drm_ioc32.c		optional drm ioc32 \
+	compile-with	"${DRM_C}"
+dev/drm/drm_ioctl.c		optional drm \
+	compile-with	"${DRM_C} -Wno-int-conversion"
+dev/drm/drm_irq.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_kms_helper_common.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_lock.c		optional drm \
+	compile-with	"${DRM_C} -Wno-cast-qual -Wno-incompatible-pointer-types-discards-qualifiers"
+dev/drm/drm_memory.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_mipi_dsi.c		optional drm \
+	compile-with	"${DRM_C} -Wno-incompatible-pointer-types-discards-qualifiers"
+dev/drm/drm_mm.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_mode_object.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_modes.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_modeset_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_modeset_lock.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_panel.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_pci.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_plane.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_plane_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_platform.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_prime.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_property.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_rect.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_scatter.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_simple_kms_helper.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_sysfs.c		optional drm \
+	compile-with	"${DRM_C}"
+#dev/drm/drm_trace_points.c	optional drm \
+#	compile-with	"${DRM_C} -Wno-implicit-int -I$S/dev/drm"
+dev/drm/drm_vm.c		optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_vma_manager.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/drm_os_freebsd.c	optional drm \
+	compile-with	"${DRM_C} -Wno-unused-function"
+dev/drm/linux_fb.c	optional drm \
+	compile-with	"${DRM_C} -Wno-incompatible-pointer-types"
+dev/drm/tainted_linux_fb.c	optional drm \
+	compile-with	"${DRM_C}"
+dev/drm/linux_hdmi.c	optional drm \
+	compile-with	"${DRM_C}"
 dev/ed/if_ed.c			optional ed
 dev/ed/if_ed_novell.c		optional ed
 dev/ed/if_ed_rtl80x9.c		optional ed
@@ -4247,34 +4287,75 @@ nlm/nlm_prot_xdr.c		optional nfslockd | nfsd
 nlm/sm_inter_xdr.c		optional nfslockd | nfsd
 
 # Linux Kernel Programming Interface
-compat/linuxkpi/common/src/linux_kmod.c		optional compat_linuxkpi \
+compat/linuxkpi/common/src/linux_acpi.c		optional compat_linuxkpi acpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_compat.c	optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_current.c	optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_device.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_dmabuf.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_fence.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_firmware.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_fs.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_hrtimer.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_i2c.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_idr.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_irq.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_kmod.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_kthread.c	optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_lock.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_mtrr.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_notifier.c	optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_page.c		optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_pci.c		optional compat_linuxkpi pci \
 	compile-with "${LINUXKPI_C}"
-compat/linuxkpi/common/src/linux_tasklet.c	optional compat_linuxkpi \
-	compile-with "${LINUXKPI_C}"
-compat/linuxkpi/common/src/linux_idr.c		optional compat_linuxkpi \
-	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_radix.c	optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_rcu.c		optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C} -I$S/contrib/ck/include"
+compat/linuxkpi/common/src/linux_reservation.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_schedule.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_seq_file.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_slab.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_sort.c		optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_stubs.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_sysfs.c	optional compat_linuxkpi \
+	compile-with "${LINUXKPI_C}"
+compat/linuxkpi/common/src/linux_tasklet.c	optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_usb.c		optional compat_linuxkpi usb \
 	compile-with "${LINUXKPI_C}"
 compat/linuxkpi/common/src/linux_work.c		optional compat_linuxkpi \
 	compile-with "${LINUXKPI_C}"
+compat/linsysfs/linsysfs_init.c			optional linsysfs \
+	compile-with "${LINUXKPI_C}"
+compat/linsysfs/linsysfs_extern.c		optional linsysfs \
+	compile-with "${LINUXKPI_C}"
+compat/lindebugfs/lindebugfs.c			optional lindebugfs \
+	compile-with "${LINUXKPI_C}"
+compat/linux/linux_util.c	optional compat_linux
 
 # OpenFabrics Enterprise Distribution (Infiniband)
 ofed/drivers/infiniband/core/addr.c		optional ofed		\

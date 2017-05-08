@@ -142,7 +142,11 @@ linux_driver_get_major_minor(const char *node, int *major, int *minor)
 		 */
 		devno = strtoul(node + strlen("pts/"), NULL, 10);
 		*major = 136 + (devno / 256);
+#if defined(__arm__)
+		*minor = (int)devno % (int)256;
+#else
 		*minor = devno % 256;
+#endif
 
 		return (0);
 	}
